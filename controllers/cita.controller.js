@@ -1,5 +1,5 @@
 // controllers/cita.controller.js
-const pool = require('../config/db');
+const supabase = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
 
 /**
@@ -15,68 +15,60 @@ exports.updateCita = async (req, res) => {
         return res.status(400).json({ msg: 'Debe proporcionar al menos un campo para actualizar.' });
     }
 
-    const connection = await pool.getConnection();
     try {
-        await connection.beginTransaction();
-
-        // Obtener datos actuales de la cita para no sobrescribir con null si no se envían
-        const [currentCitaRows] = await connection.execute('SELECT * FROM citas WHERE id = ?', [id_cita]);
-        if (currentCitaRows.length === 0) {
-            await connection.rollback();
-            return res.status(404).json({ msg: 'La cita no fue encontrada.' });
-        }
-        const currentCita = currentCitaRows[0];
+        // Obtener cita actual
+        const { data: currentCita, error: getErr } = await supabase.from('citas').select('*').eq('id', id_cita).single();
+        if (getErr || !currentCita) return res.status(404).json({ msg: 'La cita no fue encontrada.' });
 
         const new_fecha_inicio = fecha_hora_inicio || currentCita.fecha_hora_inicio;
         const new_fecha_fin = fecha_hora_fin || currentCita.fecha_hora_fin;
 
-        // Validación de conflictos para el nuevo personal en el nuevo horario, excluyendo la cita actual
+        // Validación de conflictos: obtener citas asignadas al personal y verificar solapamientos
         if (personal_asignado && Array.isArray(personal_asignado) && personal_asignado.length > 0) {
-            const placeholders = personal_asignado.map(() => '?').join(',');
-            const validationQuery = `
-                SELECT COUNT(*) as conflict_count
-                FROM citas c
-                JOIN citas_personal_asignado cpa ON c.id = cpa.id_cita
-                WHERE cpa.id_equipo IN (${placeholders})
-                  AND (c.fecha_hora_inicio < ? AND c.fecha_hora_fin > ?)
-                  AND c.id != ? 
-            `;
-            const validationParams = [...personal_asignado, new_fecha_fin, new_fecha_inicio, id_cita];
-            const [validationRows] = await connection.execute(validationQuery, validationParams);
+            const { data: asignaciones, error: asigErr } = await supabase
+                .from('citas_personal_asignado')
+                .select('id_cita')
+                .in('id_equipo', personal_asignado);
+            if (asigErr) throw asigErr;
 
-            if (validationRows[0].conflict_count > 0) {
-                await connection.rollback();
-                return res.status(409).json({ msg: 'Conflicto: El nuevo personal ya está ocupado en el horario especificado.' });
+            const citaIds = (asignaciones || []).map(a => a.id_cita).filter(id => id !== id_cita);
+            if (citaIds.length > 0) {
+                const { data: citasConflicto, error: citasErr } = await supabase
+                    .from('citas')
+                    .select('id')
+                    .in('id', citaIds)
+                    .lt('fecha_hora_inicio', new_fecha_fin)
+                    .gt('fecha_hora_fin', new_fecha_inicio);
+                if (citasErr) throw citasErr;
+                if (citasConflicto && citasConflicto.length > 0) {
+                    return res.status(409).json({ msg: 'Conflicto: El nuevo personal ya está ocupado en el horario especificado.' });
+                }
             }
         }
 
         // Actualizar la cita
-        const updateQuery = 'UPDATE citas SET titulo = ?, fecha_hora_inicio = ?, fecha_hora_fin = ?, notas_internas = ? WHERE id = ?';
-        await connection.execute(updateQuery, [
-            titulo || currentCita.titulo,
-            new_fecha_inicio,
-            new_fecha_fin,
-            notas_internas || currentCita.notas_internas,
-            id_cita
-        ]);
+        const { error: updateErr } = await supabase.from('citas').update({
+            titulo: titulo || currentCita.titulo,
+            fecha_hora_inicio: new_fecha_inicio,
+            fecha_hora_fin: new_fecha_fin,
+            notas_internas: notas_internas || currentCita.notas_internas
+        }).eq('id', id_cita);
+        if (updateErr) throw updateErr;
 
-        // Re-asignar personal
-        await connection.execute('DELETE FROM citas_personal_asignado WHERE id_cita = ?', [id_cita]);
+        // Re-asignar personal: eliminar y volver a insertar
+        const { error: delErr } = await supabase.from('citas_personal_asignado').delete().eq('id_cita', id_cita);
+        if (delErr) throw delErr;
+
         if (personal_asignado && Array.isArray(personal_asignado) && personal_asignado.length > 0) {
-            const asignacionQuery = 'INSERT INTO citas_personal_asignado (id_cita, id_equipo) VALUES ?';
-            const asignacionValues = personal_asignado.map(id_miembro => [id_cita, id_miembro]);
-            await connection.query(asignacionQuery, [asignacionValues]);
+            const rows = personal_asignado.map(id_miembro => ({ id_cita, id_equipo: id_miembro }));
+            const { error: insertErr } = await supabase.from('citas_personal_asignado').insert(rows);
+            if (insertErr) throw insertErr;
         }
 
-        await connection.commit();
         res.json({ msg: 'Cita actualizada con éxito.' });
-
     } catch (error) {
-        await connection.rollback();
         console.error('Error al actualizar la cita:', error);
         res.status(500).json({ msg: 'Error interno del servidor.' });
-    } finally {
-        if (connection) connection.release();
     }
 };
 
@@ -89,15 +81,10 @@ exports.deleteCita = async (req, res) => {
     const { id } = req.params;
 
     try {
-        // La BD se encarga de borrar en cascada en `citas_personal_asignado`
-        const [result] = await pool.execute('DELETE FROM citas WHERE id = ?', [id]);
-
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ msg: 'Cita no encontrada.' });
-        }
-
+        const { data, error } = await supabase.from('citas').delete().eq('id', id).select();
+        if (error) throw error;
+        if (!data || data.length === 0) return res.status(404).json({ msg: 'Cita no encontrada.' });
         res.json({ msg: 'Cita eliminada con éxito.' });
-
     } catch (error) {
         console.error('Error al eliminar la cita:', error);
         res.status(500).json({ msg: 'Error interno del servidor.' });

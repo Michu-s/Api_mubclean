@@ -1,27 +1,26 @@
 // config/db.js
-const mysql = require('mysql2/promise');
+const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'mubclean',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
+// Crear cliente de Supabase
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
 
-// Mensaje de éxito para verificar la conexión al iniciar
-pool.getConnection()
-  .then(connection => {
-    console.log('✅ Conexión a la base de datos establecida.');
-    connection.release();
+if (!supabaseUrl || !supabaseKey) {
+  console.error('❌ Error: SUPABASE_URL o SUPABASE_KEY no están definidos en .env');
+  process.exit(1);
+}
+
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+// Prueba de conexión
+supabase.auth.getUser()
+  .then(() => {
+    console.log('✅ Conexión a Supabase establecida correctamente.');
   })
   .catch(err => {
-    console.error('❌ Error al conectar con la base de datos:', err.message);
-    // Salir del proceso si no se puede conectar a la BD es una buena práctica
+    console.error('❌ Error al conectar con Supabase:', err.message);
     process.exit(1);
   });
 
-module.exports = pool;
+module.exports = supabase;

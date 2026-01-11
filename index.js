@@ -61,6 +61,7 @@ const solicitudRoutes = require('./routes/solicitud.routes');
 const citaRoutes = require('./routes/citas.routes');
 const marketplaceRoutes = require('./routes/marketplace.routes');
 const uploadRoutes = require('./routes/upload.routes');
+const itemsRoutes = require('./routes/items.routes');
 
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/negocio', negocioRoutes);
@@ -69,6 +70,7 @@ app.use('/api/v1/solicitudes', solicitudRoutes);
 app.use('/api/v1/citas', citaRoutes);
 app.use('/api/v1/marketplace', marketplaceRoutes);
 app.use('/api/v1/uploads', uploadRoutes);
+app.use('/api/v1/items', itemsRoutes);
 
 
 // --- Manejo de Errores y Puerto ---

@@ -1,5 +1,5 @@
 // controllers/solicitud.controller.js
-const pool = require('../config/db');
+const supabase = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
 
 /**
@@ -19,60 +19,70 @@ exports.createSolicitud = async (req, res) => {
         return res.status(400).json({ msg: 'Los campos de dirección calle, ciudad y estado son obligatorios.' });
     }
 
-    const connection = await pool.getConnection();
     try {
-        await connection.beginTransaction();
-
         const idSolicitud = uuidv4();
-        const solicitudQuery = `
-            INSERT INTO solicitudes_servicio 
-            (id, id_usuario, id_negocio, id_tipo_servicio, id_estado, id_metodo_pago_preferido, fecha_deseada, es_urgente, pago_anticipado, servicio_calle, servicio_numero, servicio_colonia, servicio_ciudad, servicio_estado, servicio_codigo_postal, servicio_referencias) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-        
-        await connection.execute(solicitudQuery, [
-            idSolicitud,
-            id_usuario, // Directamente del token
-            id_negocio, // Directamente del body
-            id_tipo_servicio,
-            1, // Estado inicial: "Pendiente"
-            id_metodo_pago_preferido || null,
-            fecha_deseada || null,
-            es_urgente ? 1 : 0,
-            pago_anticipado ? 1 : 0,
-            direccion_servicio.calle,
-            direccion_servicio.numero || 'S/N',
-            direccion_servicio.colonia || null,
-            direccion_servicio.ciudad,
-            direccion_servicio.estado,
-            direccion_servicio.codigo_postal || null,
-            direccion_servicio.referencias || null
-        ]);
 
-        // Lógica para detalles e imágenes (sin cambios)
+        const { data: inserted, error: insertErr } = await supabase.from('solicitudes_servicio').insert({
+            id: idSolicitud,
+            id_usuario,
+            id_negocio,
+            id_tipo_servicio,
+            id_estado: 1,
+            id_metodo_pago_preferido: id_metodo_pago_preferido || null,
+            fecha_deseada: fecha_deseada || null,
+            es_urgente: !!es_urgente,
+            pago_anticipado: !!pago_anticipado,
+            servicio_calle: direccion_servicio.calle,
+            servicio_numero: direccion_servicio.numero || 'S/N',
+            servicio_colonia: direccion_servicio.colonia || null,
+            servicio_ciudad: direccion_servicio.ciudad,
+            servicio_estado: direccion_servicio.estado,
+            servicio_codigo_postal: direccion_servicio.codigo_postal || null,
+            servicio_referencias: direccion_servicio.referencias || null
+        }).select().single();
+
+        if (insertErr) throw insertErr;
+
+        // Insertar detalles e imágenes (no transaccional; si requieres atomicidad usa funciones SQL en Supabase)
         if (detalles && Array.isArray(detalles)) {
             for (const detalle of detalles) {
                 const idDetalle = uuidv4();
-                await connection.execute('INSERT INTO detalles_solicitud (id, id_solicitud, descripcion, tipo_mueble, tamano_mueble) VALUES (?, ?, ?, ?, ?)', [idDetalle, idSolicitud, detalle.descripcion, detalle.tipo_mueble || null, detalle.tamano_mueble || null]);
+                const { error: detErr } = await supabase.from('detalles_solicitud').insert({
+                    id: idDetalle,
+                    id_solicitud: idSolicitud,
+                    descripcion: detalle.descripcion,
+                    tipo_mueble: detalle.tipo_mueble || null,
+                    tamano_mueble: detalle.tamano_mueble || null
+                });
+                if (detErr) throw detErr;
+
                 if (detalle.imagenes && Array.isArray(detalle.imagenes)) {
                     for (const imagen of detalle.imagenes) {
                         if (imagen.url_imagen) {
                             const idImagen = uuidv4();
-                            await connection.execute('INSERT INTO imagenes (id, id_usuario_subida, url_imagen, tipo_mime) VALUES (?, ?, ?, ?)', [idImagen, id_usuario, imagen.url_imagen, imagen.tipo_mime || null]);
-                            await connection.execute('INSERT INTO detalles_solicitud_imagenes (id_detalle_solicitud, id_imagen) VALUES (?, ?)', [idDetalle, idImagen]);
+                            const { error: imgErr } = await supabase.from('imagenes').insert({
+                                id: idImagen,
+                                id_usuario_subida: id_usuario,
+                                url_imagen: imagen.url_imagen,
+                                tipo_mime: imagen.tipo_mime || null
+                            });
+                            if (imgErr) throw imgErr;
+
+                            const { error: linkErr } = await supabase.from('detalles_solicitud_imagenes').insert({
+                                id_detalle_solicitud: idDetalle,
+                                id_imagen: idImagen
+                            });
+                            if (linkErr) throw linkErr;
                         }
                     }
                 }
             }
         }
 
-        await connection.commit();
         res.status(201).json({ msg: 'Solicitud creada con éxito.', id_solicitud: idSolicitud });
     } catch (error) {
-        await connection.rollback();
         console.error('Error al crear la solicitud:', error);
         res.status(500).json({ msg: 'Error interno del servidor.', error: error.message });
-    } finally {
-        if (connection) connection.release();
     }
 };
 
@@ -84,28 +94,42 @@ exports.createSolicitud = async (req, res) => {
 exports.getSolicitudes = async (req, res) => {
     const { roleId, id: userId, businessId } = req.user;
     try {
-        let query, params;
-        if (roleId === 1) { // Rol de Dueño de Negocio (Admin)
-            query = `
-                SELECT s.id, s.fecha_solicitud, s.es_urgente, u.nombre_completo as nombre_cliente, es.nombre as estado, s.servicio_calle, s.servicio_numero
-                FROM solicitudes_servicio s 
-                JOIN usuarios u ON s.id_usuario = u.id 
-                JOIN estados_solicitud es ON s.id_estado = es.id 
-                WHERE s.id_negocio = ? 
-                ORDER BY s.fecha_solicitud DESC`;
-            params = [businessId];
-        } else { // Rol de Cliente
-            query = `
-                SELECT s.id, s.fecha_solicitud, s.es_urgente, n.nombre as nombre_negocio, es.nombre as estado, s.servicio_calle, s.servicio_numero
-                FROM solicitudes_servicio s 
-                JOIN negocios n ON s.id_negocio = n.id 
-                JOIN estados_solicitud es ON s.id_estado = es.id 
-                WHERE s.id_usuario = ? 
-                ORDER BY s.fecha_solicitud DESC`;
-            params = [userId];
+        if (roleId === 1) {
+            const { data: solicitudes, error } = await supabase
+                .from('solicitudes_servicio')
+                .select('id, fecha_solicitud, es_urgente, usuarios(nombre_completo), estados_solicitud(nombre), servicio_calle, servicio_numero')
+                .eq('id_negocio', businessId)
+                .order('fecha_solicitud', { ascending: false });
+            if (error) throw error;
+            // Normalizar nombres para compatibilidad con frontend
+            const mapped = (solicitudes || []).map(s => ({
+                id: s.id,
+                fecha_solicitud: s.fecha_solicitud,
+                es_urgente: s.es_urgente,
+                nombre_cliente: s.usuarios ? s.usuarios.nombre_completo : null,
+                estado: s.estados_solicitud ? s.estados_solicitud.nombre : null,
+                servicio_calle: s.servicio_calle,
+                servicio_numero: s.servicio_numero
+            }));
+            return res.json(mapped);
+        } else {
+            const { data: solicitudes, error } = await supabase
+                .from('solicitudes_servicio')
+                .select('id, fecha_solicitud, es_urgente, negocios(nombre), estados_solicitud(nombre), servicio_calle, servicio_numero')
+                .eq('id_usuario', userId)
+                .order('fecha_solicitud', { ascending: false });
+            if (error) throw error;
+            const mapped = (solicitudes || []).map(s => ({
+                id: s.id,
+                fecha_solicitud: s.fecha_solicitud,
+                es_urgente: s.es_urgente,
+                nombre_negocio: s.negocios ? s.negocios.nombre : null,
+                estado: s.estados_solicitud ? s.estados_solicitud.nombre : null,
+                servicio_calle: s.servicio_calle,
+                servicio_numero: s.servicio_numero
+            }));
+            return res.json(mapped);
         }
-        const [solicitudes] = await pool.execute(query, params);
-        res.json(solicitudes);
     } catch (error) {
         console.error('Error al obtener solicitudes:', error);
         res.status(500).json({ msg: 'Error interno del servidor.' });
@@ -119,125 +143,71 @@ exports.getSolicitudes = async (req, res) => {
 exports.getSolicitudById = async (req, res) => {
     const { id: id_solicitud } = req.params;
     const { roleId, id: userId, businessId } = req.user;
-    const connection = await pool.getConnection();
-
     try {
-        // --- CONSULTA SQL PRINCIPAL ---
-        const mainQuery = `
-            SELECT 
-                s.id,
-                s.id_usuario,
-                s.id_negocio,
-                s.id_tipo_servicio,
-                s.id_estado,
-                s.id_metodo_pago_preferido,
-                s.fecha_solicitud,
-                s.fecha_deseada,
-                s.es_urgente,
-                s.pago_anticipado,
-                s.servicio_calle,
-                s.servicio_numero,
-                s.servicio_colonia,
-                s.servicio_ciudad,
-                s.servicio_estado,
-                s.servicio_codigo_postal,
-                s.servicio_referencias,
-                u.nombre_completo as nombre_cliente,
-                u.telefono as telefono_cliente,
-                es.nombre as nombre_estado,
-                ts.nombre as nombre_servicio,
-                mp.nombre as nombre_metodo_pago
-            FROM solicitudes_servicio s
-            JOIN usuarios u ON s.id_usuario = u.id
-            JOIN estados_solicitud es ON s.id_estado = es.id
-            JOIN tipos_servicio ts ON s.id_tipo_servicio = ts.id
-            LEFT JOIN metodos_pago mp ON s.id_metodo_pago_preferido = mp.id
-            WHERE s.id = ?
-        `;
-        const [solicitudes] = await connection.execute(mainQuery, [id_solicitud]);
+        // Obtener solicitud principal con joins simplificados
+        const { data: solicitudRows, error: mainErr } = await supabase
+            .from('solicitudes_servicio')
+            .select('*')
+            .eq('id', id_solicitud);
+        if (mainErr) throw mainErr;
+        if (!solicitudRows || solicitudRows.length === 0) return res.status(404).json({ msg: 'Solicitud no encontrada.' });
 
-        if (solicitudes.length === 0) {
-            return res.status(404).json({ msg: 'Solicitud no encontrada.' });
-        }
+        const solicitud = solicitudRows[0];
 
-        const solicitud = solicitudes[0];
-
-        // --- REQUERIMIENTO DE SEGURIDAD ---
+        // Seguridad
         if ((roleId === 2 && solicitud.id_usuario !== userId) || (roleId === 1 && solicitud.id_negocio !== businessId)) {
             return res.status(403).json({ msg: 'No tienes permiso para ver esta solicitud.' });
         }
 
-        // --- SUB-CONSULTAS Y CÁLCULO ---
-        const [
-            detallesResult, 
-            cotizacionResult, 
-            citasResult, 
-            pagosResult, 
-            incidentesResult
-        ] = await Promise.all([
-            connection.execute('SELECT * FROM detalles_solicitud WHERE id_solicitud = ?', [id_solicitud]),
-            connection.execute('SELECT * FROM cotizaciones WHERE id_solicitud = ? ORDER BY fecha_creacion DESC LIMIT 1', [id_solicitud]),
-            connection.execute('SELECT * FROM citas WHERE id_solicitud = ? ORDER BY fecha_hora_inicio ASC', [id_solicitud]),
-            connection.execute('SELECT * FROM pagos WHERE id_solicitud = ? ORDER BY fecha_pago', [id_solicitud]),
-            connection.execute('SELECT * FROM incidentes WHERE id_solicitud_servicio = ? ORDER BY fecha_creacion DESC', [id_solicitud]) // CORRECCIÓN APLICADA AQUÍ
-        ]);
-
-        // 1. Procesar Detalles e Imágenes
-        const [detalles] = detallesResult;
-        for (const detalle of detalles) {
-            const [imagenes] = await connection.execute(
-                `SELECT i.url_imagen, i.tipo_mime 
-                 FROM detalles_solicitud_imagenes dsi
-                 JOIN imagenes i ON dsi.id_imagen = i.id
-                 WHERE dsi.id_detalle_solicitud = ?`,
-                [detalle.id]
-            );
-            detalle.imagenes = imagenes;
+        // Detalles e imágenes
+        const { data: detalles } = await supabase.from('detalles_solicitud').select('*').eq('id_solicitud', id_solicitud);
+        if (detalles && detalles.length > 0) {
+            for (const detalle of detalles) {
+                const { data: imagenes } = await supabase
+                    .from('detalles_solicitud_imagenes')
+                    .select('imagenes(url_imagen, tipo_mime)')
+                    .eq('id_detalle_solicitud', detalle.id);
+                detalle.imagenes = (imagenes || []).map(x => x.imagenes).flat();
+            }
         }
-        solicitud.detalles = detalles;
+        solicitud.detalles = detalles || [];
 
-        // 2. Procesar Cotización y Líneas
-        const [cotizaciones] = cotizacionResult;
-        if (cotizaciones.length > 0) {
+        // Cotización y líneas (última)
+        const { data: cotizaciones } = await supabase.from('cotizaciones').select('*').eq('id_solicitud', id_solicitud).order('fecha_creacion', { ascending: false }).limit(1);
+        if (cotizaciones && cotizaciones.length > 0) {
             const cotizacion = cotizaciones[0];
-            const [lineas] = await connection.execute('SELECT * FROM lineas_cotizacion WHERE id_cotizacion = ?', [cotizacion.id]);
-            cotizacion.lineas = lineas;
-
-            cotizacion.monto_total_calculado = lineas.reduce((total, linea) => {
-                const cantidad = parseFloat(linea.cantidad) || 0;
-                const precio_unitario = parseFloat(linea.precio_unitario) || 0;
-                return total + (cantidad * precio_unitario);
-            }, 0);
+            const { data: lineas } = await supabase.from('lineas_cotizacion').select('*').eq('id_cotizacion', cotizacion.id);
+            cotizacion.lineas = lineas || [];
+            cotizacion.monto_total_calculado = (lineas || []).reduce((total, linea) => total + ((parseFloat(linea.cantidad) || 0) * (parseFloat(linea.precio_unitario) || 0)), 0);
             solicitud.cotizacion = cotizacion;
         } else {
             solicitud.cotizacion = null;
         }
 
-        // 3. Procesar Citas y su Personal Asignado
-        const [citas] = citasResult;
-        for (const cita of citas) {
-            const [personal] = await connection.execute(
-                `SELECT e.id, e.nombre_completo, e.telefono
-                 FROM equipo e
-                 JOIN citas_personal_asignado cpa ON e.id = cpa.id_equipo
-                 WHERE cpa.id_cita = ?`,
-                [cita.id]
-            );
-            cita.personal_asignado = personal;
+        // Citas y personal asignado
+        const { data: citas } = await supabase.from('citas').select('*').eq('id_solicitud', id_solicitud).order('fecha_hora_inicio', { ascending: true });
+        if (citas && citas.length > 0) {
+            for (const cita of citas) {
+                const { data: personal } = await supabase
+                    .from('citas_personal_asignado')
+                    .select('equipo(id, nombre_completo, telefono)')
+                    .eq('id_cita', cita.id);
+                cita.personal_asignado = (personal || []).map(p => p.equipo).flat();
+            }
         }
-        solicitud.citas = citas;
+        solicitud.citas = citas || [];
 
-        // 4 y 5. Asignar resultados de pagos e incidentes
-        solicitud.pagos = pagosResult[0];
-        solicitud.incidentes = incidentesResult[0];
+        // Pagos e incidentes
+        const { data: pagos } = await supabase.from('pagos').select('*').eq('id_solicitud', id_solicitud).order('fecha_pago', { ascending: true });
+        const { data: incidentes } = await supabase.from('incidentes').select('*').eq('id_solicitud_servicio', id_solicitud).order('fecha_creacion', { ascending: false });
+
+        solicitud.pagos = pagos || [];
+        solicitud.incidentes = incidentes || [];
 
         res.json(solicitud);
-
     } catch (error) {
         console.error('Error al obtener el detalle de la solicitud:', error);
         res.status(500).json({ msg: 'Error interno del servidor.', error: error.message });
-    } finally {
-        if (connection) connection.release();
     }
 };
 

@@ -1,5 +1,5 @@
 // controllers/cliente.controller.js
-const pool = require('../config/db');
+const supabase = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
 
 // --- Operaciones de Perfil Global (Usuario) ---
@@ -8,8 +8,14 @@ const { v4: uuidv4 } = require('uuid');
 exports.getMiPerfil = async (req, res) => {
     const { id: userId } = req.user;
     try {
-        const [rows] = await pool.execute('SELECT id, nombre_completo, email, telefono, url_foto_perfil, fecha_creacion FROM usuarios WHERE id = ?', [userId]);
-        if (rows.length === 0) {
+        const { data: rows, error } = await supabase
+            .from('usuarios')
+            .select('id, nombre_completo, email, telefono, url_foto_perfil, fecha_creacion')
+            .eq('id', userId);
+        
+        if (error) throw error;
+        
+        if (!rows || rows.length === 0) {
             return res.status(404).json({ msg: 'Usuario no encontrado.' });
         }
         res.json(rows[0]);
@@ -24,24 +30,24 @@ exports.updateMiPerfil = async (req, res) => {
     const { id: userId } = req.user;
     const { nombre_completo, telefono, url_foto_perfil } = req.body;
     
-    const fields = [];
-    const values = [];
+    const updateData = {};
+    
+    if (nombre_completo) updateData.nombre_completo = nombre_completo;
+    if (telefono) updateData.telefono = telefono;
+    if (url_foto_perfil) updateData.url_foto_perfil = url_foto_perfil;
 
-    if (nombre_completo) { fields.push('nombre_completo = ?'); values.push(nombre_completo); }
-    if (telefono) { fields.push('telefono = ?'); values.push(telefono); }
-    if (url_foto_perfil) { fields.push('url_foto_perfil = ?'); values.push(url_foto_perfil); }
-
-    if (fields.length === 0) {
+    if (Object.keys(updateData).length === 0) {
         return res.status(400).json({ msg: 'Proporcione al menos un campo para actualizar.' });
     }
 
-    values.push(userId);
-
     try {
-        const [result] = await pool.execute(`UPDATE usuarios SET ${fields.join(', ')} WHERE id = ?`, values);
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ msg: 'Usuario no encontrado.' });
-        }
+        const { error } = await supabase
+            .from('usuarios')
+            .update(updateData)
+            .eq('id', userId);
+        
+        if (error) throw error;
+        
         res.json({ msg: 'Perfil actualizado con éxito.' });
     } catch (error) {
         console.error('Error en updateMiPerfil:', error);
@@ -61,8 +67,15 @@ exports.getDirecciones = async (req, res) => {
     }
 
     try {
-        const [rows] = await pool.execute('SELECT * FROM direcciones WHERE id_usuario = ? AND id_negocio = ?', [id_usuario, id_negocio]);
-        res.json(rows);
+        const { data: rows, error } = await supabase
+            .from('direcciones')
+            .select('*')
+            .eq('id_usuario', id_usuario)
+            .eq('id_negocio', id_negocio);
+        
+        if (error) throw error;
+        
+        res.json(rows || []);
     } catch (error) {
         console.error('Error en getDirecciones:', error);
         res.status(500).json({ msg: 'Error interno del servidor' });
@@ -80,10 +93,23 @@ exports.createDireccion = async (req, res) => {
 
     try {
         const id_direccion = uuidv4();
-        await pool.execute(
-            'INSERT INTO direcciones (id, id_usuario, id_negocio, calle_y_numero, colonia, ciudad, estado, codigo_postal, referencias, es_predeterminada) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [id_direccion, id_usuario, id_negocio, calle_y_numero, colonia || null, ciudad, estado, codigo_postal || null, referencias || null, es_predeterminada || false]
-        );
+        const { error } = await supabase
+            .from('direcciones')
+            .insert({
+                id: id_direccion,
+                id_usuario,
+                id_negocio,
+                calle_y_numero,
+                colonia: colonia || null,
+                ciudad,
+                estado,
+                codigo_postal: codigo_postal || null,
+                referencias: referencias || null,
+                es_predeterminada: es_predeterminada || false
+            });
+        
+        if (error) throw error;
+        
         res.status(201).json({ msg: 'Dirección creada con éxito', id_direccion });
     } catch (error) {
         console.error('Error en createDireccion:', error);
@@ -97,28 +123,29 @@ exports.updateDireccion = async (req, res) => {
     const { id } = req.params;
     const { calle_y_numero, ciudad, estado, codigo_postal, colonia, referencias, es_predeterminada } = req.body;
 
-    const fields = [];
-    const values = [];
+    const updateData = {};
 
-    if (calle_y_numero) { fields.push('calle_y_numero = ?'); values.push(calle_y_numero); }
-    if (ciudad) { fields.push('ciudad = ?'); values.push(ciudad); }
-    if (estado) { fields.push('estado = ?'); values.push(estado); }
-    if (codigo_postal) { fields.push('codigo_postal = ?'); values.push(codigo_postal); }
-    if (colonia) { fields.push('colonia = ?'); values.push(colonia); }
-    if (referencias) { fields.push('referencias = ?'); values.push(referencias); }
-    if (es_predeterminada !== undefined) { fields.push('es_predeterminada = ?'); values.push(es_predeterminada); }
+    if (calle_y_numero) updateData.calle_y_numero = calle_y_numero;
+    if (ciudad) updateData.ciudad = ciudad;
+    if (estado) updateData.estado = estado;
+    if (codigo_postal) updateData.codigo_postal = codigo_postal;
+    if (colonia) updateData.colonia = colonia;
+    if (referencias) updateData.referencias = referencias;
+    if (es_predeterminada !== undefined) updateData.es_predeterminada = es_predeterminada;
 
-    if (fields.length === 0) {
+    if (Object.keys(updateData).length === 0) {
         return res.status(400).json({ msg: 'Proporcione al menos un campo para actualizar.' });
     }
 
-    values.push(id, id_usuario);
-
     try {
-        const [result] = await pool.execute(`UPDATE direcciones SET ${fields.join(', ')} WHERE id = ? AND id_usuario = ?`, values);
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ msg: 'Dirección no encontrada o no tienes permiso para modificarla.' });
-        }
+        const { error } = await supabase
+            .from('direcciones')
+            .update(updateData)
+            .eq('id', id)
+            .eq('id_usuario', id_usuario);
+        
+        if (error) throw error;
+        
         res.json({ msg: 'Dirección actualizada con éxito.' });
     } catch (error) {
         console.error('Error en updateDireccion:', error);
@@ -132,10 +159,14 @@ exports.deleteDireccion = async (req, res) => {
     const { id } = req.params;
 
     try {
-        const [result] = await pool.execute('DELETE FROM direcciones WHERE id = ? AND id_usuario = ?', [id, id_usuario]);
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ msg: 'Dirección no encontrada o no tienes permiso para eliminarla.' });
-        }
+        const { error } = await supabase
+            .from('direcciones')
+            .delete()
+            .eq('id', id)
+            .eq('id_usuario', id_usuario);
+        
+        if (error) throw error;
+        
         res.json({ msg: 'Dirección eliminada con éxito.' });
     } catch (error) {
         console.error('Error en deleteDireccion:', error);
@@ -150,30 +181,29 @@ exports.getMisNegocios = async (req, res) => {
     const { id: id_cliente } = req.user;
 
     try {
-        const [rows] = await pool.execute(`
-            SELECT DISTINCT
-                n.id,
-                n.nombre,
-                n.razon_social,
-                n.rfc,
-                n.email,
-                n.telefono,
-                n.url_logo,
-                n.direccion,
-                n.latitud,
-                n.longitud,
-                n.descripcion,
-                n.fecha_creacion
-            FROM
-                negocios n
-            JOIN
-                solicitudes_servicio ss ON n.id = ss.id_negocio
-            WHERE
-                ss.id_cliente = ?
-        `, [id_cliente]);
+        const { data: rows, error } = await supabase
+            .from('negocios')
+            .select(`
+                id,
+                nombre,
+                descripcion,
+                url_logo,
+                url_banner,
+                nombre_dueno,
+                email_contacto,
+                telefono_contacto,
+                fecha_creacion
+            `)
+            .in('id', 
+                supabase
+                    .from('solicitudes_servicio')
+                    .select('id_negocio')
+                    .eq('id_usuario', id_cliente)
+            );
+        
+        if (error) throw error;
 
-        if (rows.length === 0) {
-            return res.status(404).json({ msg: 'No se encontraron negocios para este cliente.' });
+        if (!rows || rows.length === 0) {
         }
 
         res.json(rows);

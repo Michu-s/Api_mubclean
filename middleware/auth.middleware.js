@@ -1,6 +1,6 @@
 // middleware/auth.middleware.js
 const jwt = require('jsonwebtoken');
-const pool = require('../config/db');
+const supabase = require('../config/db');
 require('dotenv').config();
 
 const proteger = async (req, res, next) => {
@@ -17,12 +17,13 @@ const proteger = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     // 2. Consultar la base de datos para obtener los datos personales del usuario
-    const [users] = await pool.execute(
-      'SELECT id, nombre_completo, email, url_foto_perfil FROM usuarios WHERE id = ? AND activo = true',
-      [decoded.userId]
-    );
+    const { data: users, error } = await supabase
+      .from('usuarios')
+      .select('id, nombre_completo, email, url_foto_perfil')
+      .eq('id', decoded.userId)
+      .eq('activo', true);
 
-    if (users.length === 0) {
+    if (error || !users || users.length === 0) {
       return res.status(401).json({ msg: 'Usuario no encontrado o inactivo.' });
     }
 
