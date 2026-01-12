@@ -25,8 +25,28 @@ router.use(proteger, esAdmin);
  *     security: [{ bearerAuth: [] }]
  *     responses:
  *       200: { description: 'Perfil del negocio.' }
+ *   post:
+ *     summary: (Admin) Crea un nuevo negocio
+ *     tags: [Negocio]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [nombre, telefono_contacto, email_contacto]
+ *             properties:
+ *               nombre: { type: 'string' }
+ *               telefono_contacto: { type: 'string' }
+ *               email_contacto: { type: 'string', format: 'email' }
+ *               descripcion: { type: 'string' }
+ *               url_logo: { type: 'string', format: 'uri' }
+ *               url_banner: { type: 'string', format: 'uri' }
+ *     responses:
+ *       201: { description: 'Negocio creado con éxito.' }
  *   put:
- *     summary: (Admin) Actualiza el perfil del negocio
+ *     summary: (Admin) Actualiza el perfil del negocio (Contexto o ID user)
  *     tags: [Negocio]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
@@ -47,7 +67,43 @@ router.use(proteger, esAdmin);
  */
 router.route('/')
     .get(negocioController.getNegocio)
+    .post(negocioController.createNegocio)
     .put(negocioController.updateNegocio);
+
+/**
+ * @swagger
+ * /api/v1/negocio/{id}:
+ *   put:
+ *     summary: (Admin) Actualiza el perfil de un negocio específico por ID
+ *     tags: [Negocio]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               nombre: { type: 'string' }
+ *               telefono_contacto: { type: 'string' }
+ *               email_contacto: { type: 'string', format: 'email' }
+ *               descripcion: { type: 'string' }
+ *               url_logo: { type: 'string', format: 'uri' }
+ *               url_banner: { type: 'string', format: 'uri' }
+ *     responses:
+ *       200: { description: 'Perfil del negocio actualizado con éxito.' }
+ *   delete:
+ *     summary: (Admin) Elimina un negocio por ID
+ *     tags: [Negocio]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }]
+ *     responses:
+ *       200: { description: 'Negocio eliminado con éxito.' }
+ */
+router.route('/:id')
+    .put(negocioController.updateNegocio)
+    .delete(negocioController.deleteNegocio);
 
 // --- Gestión de Equipo ---
 
@@ -86,6 +142,24 @@ router.route('/equipo')
 /**
  * @swagger
  * /api/v1/negocio/equipo/{id}:
+ *   put:
+ *     summary: (Admin) Actualiza un miembro del equipo
+ *     tags: [Negocio]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               nombre_completo: { type: 'string' }
+ *               email: { type: 'string', format: 'email' }
+ *               telefono: { type: 'string' }
+ *               dias_laborales: { type: 'string', description: 'JSON string for work days e.g., ["Lunes", "Martes"]' }
+ *     responses:
+ *       200: { description: 'Miembro del equipo actualizado.' }
  *   delete:
  *     summary: (Admin) Desactiva un miembro del equipo (Soft Delete)
  *     tags: [Negocio]
@@ -95,6 +169,7 @@ router.route('/equipo')
  *       200: { description: 'Miembro del equipo desactivado.' }
  */
 router.route('/equipo/:id')
+    .put(negocioController.updateMember)
     .delete(negocioController.deleteMember);
 
 /**
@@ -282,6 +357,7 @@ router.route('/metodos-pago')
  *       200: { description: 'Método de pago deshabilitado.' }
  */
 router.route('/metodos-pago/:id')
+    .put(negocioController.updateMetodoPago)
     .delete(negocioController.deleteMetodoPago);
 
 // --- Gestión de Galería ---

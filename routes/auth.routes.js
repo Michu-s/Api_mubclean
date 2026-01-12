@@ -15,24 +15,23 @@ const { registerAdmin, registerUser, login } = require('../controllers/auth.cont
  * @swagger
  * /api/v1/auth/register:
  *   post:
- *     summary: Registrar nuevo Negocio y Dueño
+ *     summary: Registrar Nuevo Administrador
  *     tags: [Autenticación]
- *     description: Crea un Usuario Global y un Negocio, vinculándolos como Dueño.
+ *     description: Crea un Usuario con rol de Administrador. El negocio se crea posteriormente.
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
- *             required: [nombre_negocio, nombre_completo, email, password, telefono]
+ *             required: [nombre_completo, email, password, telefono]
  *             properties:
- *               nombre_negocio: { type: 'string' }
  *               nombre_completo: { type: 'string' }
  *               email: { type: 'string', format: 'email' }
  *               password: { type: 'string', format: 'password' }
  *               telefono: { type: 'string' }
  *     responses:
- *       '201': { description: 'Administrador y negocio registrados con éxito.' }
+ *       '201': { description: 'Administrador registrado con éxito.' }
  */
 router.post('/register', registerAdmin);
 

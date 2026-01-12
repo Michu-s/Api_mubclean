@@ -1,20 +1,80 @@
 // controllers/auth.controller.js
-const supabase = require('../config/db');
-const bcrypt = require('bcryptjs');
+const supabase = require('../config/db'); // Tu cliente Supabase (idealmente con service role en backend)
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
 
-const registerAdmin = async (req, res) => {
-  const { nombre_negocio, nombre_completo, email, password, telefono } = req.body;
-  if (!nombre_negocio || !nombre_completo || !email || !password || !telefono) {
-    return res.status(400).json({ msg: "Todos los campos son obligatorios." });
-  }
-  
+/**
+ * Normaliza email para evitar duplicados por mayúsculas/espacios.
+ */
+const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
+
+/**
+ * Detecta un "duplicado" clásico de Postgres.
+ * 23505 = unique_violation
+ */
+const isDuplicateError = (err) => err && err.code === '23505';
+
+/**
+ * Intenta borrar un usuario de Supabase Auth (requiere service role).
+ * Si tu cliente NO tiene service role, fallará y lo ignoramos.
+ */
+const tryDeleteAuthUser = async (userId) => {
   try {
-    // 1. Crear usuario en auth.users (Supabase Auth)
+    if (!userId) return;
+    // Esto solo funciona si tu supabase client está creado con SERVICE_ROLE_KEY
+    await supabase.auth.admin.deleteUser(userId);
+  } catch (_) {
+    // Silencioso a propósito: es "best effort"
+  }
+};
+
+/**
+ * =========================================
+ * REGISTER ADMIN (crea usuario + negocio + equipo)
+ * =========================================
+ */
+const registerAdmin = async (req, res) => {
+  const { nombre_completo, email, password, telefono } = req.body;
+
+  // Validación básica
+  if (!nombre_completo || !email || !password || !telefono) {
+    return res.status(400).json({ success: false, msg: "Todos los campos son obligatorios." });
+  }
+
+  const emailNorm = normalizeEmail(email);
+
+  try {
+    /**
+     * 0) Chequeo rápido en public.usuarios (case-insensitive).
+     *    Nota: no es 100% necesario porque signUp también falla si existe,
+     *    pero lo dejamos para dar mensaje rápido.
+     */
+    const { data: existingUser, error: existingUserError } = await supabase
+      .from('usuarios')
+      .select('id')
+      .ilike('email', emailNorm)
+      .maybeSingle();
+
+    if (existingUserError) {
+      return res.status(500).json({
+        success: false,
+        msg: 'Error al verificar si el usuario ya existe.',
+        detail: existingUserError.message,
+      });
+    }
+
+    if (existingUser) {
+      return res.status(409).json({ success: false, msg: 'El email ya está registrado.' });
+    }
+
+    /**
+     * 1) Crear usuario en Supabase Auth.
+     *    IMPORTANTE: al crear auth.users, tu trigger on_auth_user_created
+     *    ejecuta handle_new_user y CREA automáticamente la fila en public.usuarios.
+     */
     const { data: authUser, error: authError } = await supabase.auth.signUp({
-      email,
+      email: emailNorm,
       password,
       options: {
         emailRedirectTo: `${process.env.FRONTEND_URL || 'http://localhost:4200'}/login`
@@ -22,185 +82,210 @@ const registerAdmin = async (req, res) => {
     });
 
     if (authError) {
+      // Si ya existe, suele venir un mensaje tipo "User already registered"
       return res.status(400).json({ success: false, msg: authError.message || 'Error en el registro.' });
     }
 
-    const id_usuario = authUser.user.id;
+    const id_usuario = authUser?.user?.id;
+    if (!id_usuario) {
+      return res.status(500).json({ success: false, msg: 'No se pudo obtener el ID del usuario creado en Auth.' });
+    }
 
-    // 2. Insertar usuario en tabla usuarios
-    const { error: userError } = await supabase
+    /**
+     * 2) NO HACER INSERT (porque ya existe por trigger).
+     *    En su lugar: UPSERT por id para completar los datos (nombre/telefono).
+     *    Esto funciona SI hay trigger y también SI no lo hubiera.
+     */
+    const { error: userUpsertError } = await supabase
       .from('usuarios')
-      .insert({
-        id: id_usuario,
-        nombre_completo,
-        email,
-        telefono,
-        activo: true,
-        fecha_creacion: new Date().toISOString()
-      });
+      .upsert(
+        {
+          id: id_usuario,
+          nombre_completo,
+          email: emailNorm,
+          telefono,
+          activo: true,
+          fecha_creacion: new Date().toISOString()
+        },
+        { onConflict: 'id' } // conflicto por PK
+      );
 
-    if (userError) {
-      return res.status(400).json({ success: false, msg: userError.message || 'Error al guardar usuario en la base de datos.' });
+    if (userUpsertError) {
+      // Aquí NO respondemos "email ya existe" salvo que realmente sea un duplicado
+      if (isDuplicateError(userUpsertError)) {
+        return res.status(409).json({ success: false, msg: 'El email ya está registrado.' });
+      }
+
+      // Si falla, intentamos rollback del auth user (best effort)
+      await tryDeleteAuthUser(id_usuario);
+
+      return res.status(400).json({
+        success: false,
+        msg: userUpsertError.message || 'Error al guardar usuario en la base de datos.',
+        code: userUpsertError.code
+      });
     }
 
-    // 3. Insertar negocio
-    const id_negocio = uuidv4();
-    const { error: negocioError } = await supabase
-      .from('negocios')
-      .insert({
-        id: id_negocio,
-        id_usuario_owner: id_usuario,
-        nombre: nombre_negocio,
-        telefono_contacto: telefono,
-        email_contacto: email,
-        fecha_creacion: new Date().toISOString()
-      });
-
-    if (negocioError) {
-      return res.status(400).json({ success: false, msg: negocioError.message || 'Error al guardar negocio.' });
-    }
-
-    // 4. Insertar en equipo
-    const { error: equipoError } = await supabase
-      .from('equipo')
-      .insert({
-        id: uuidv4(),
-        id_negocio,
-        nombre_completo,
-        telefono,
-        email,
-        activo: true
-      });
-
-    if (equipoError) {
-      return res.status(400).json({ success: false, msg: equipoError.message || 'Error al guardar equipo.' });
-    }
-
-    // 5. Generar token JWT (sin esperar confirmación de email)
-    const payload = { userId: id_usuario, businessId: id_negocio, roleId: 1 };
+    // 3. Generar token JWT (sin esperar confirmación de email)
+    // Nota: businessId es null porque aún no crea el negocio.
+    const payload = { userId: id_usuario, businessId: null, roleId: 1 };
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      msg: "Administrador y negocio registrados con éxito. Revisa tu email para confirmar tu cuenta.",
+      msg: "Administrador registrado con éxito. Ahora debes crear tu negocio.",
       token,
       user: {
         id: id_usuario,
         nombre_completo,
-        email,
+        email: emailNorm,
         roleId: 1,
-        businessId: id_negocio
+        businessId: null
       }
     });
+
   } catch (error) {
     console.error('Error en el registro de administrador:', error);
-    res.status(500).json({ success: false, msg: error.message || 'Error interno del servidor.' });
+    return res.status(500).json({ success: false, msg: error.message || 'Error interno del servidor.' });
   }
 };
 
+
+/**
+ * =========================================
+ * REGISTER USER (usuario normal)
+ * =========================================
+ */
 const registerUser = async (req, res) => {
   const { nombre_completo, email, password, telefono } = req.body;
+
   if (!nombre_completo || !email || !password) {
-    return res.status(400).json({ msg: 'Los campos nombre_completo, email y password son obligatorios.' });
+    return res.status(400).json({ success: false, msg: 'Los campos nombre_completo, email y password son obligatorios.' });
   }
-  
+
+  const emailNorm = normalizeEmail(email);
+
   try {
-    // 0. Verificar si el email ya existe en Supabase Auth
-    const { data: authUserLookup, error: authLookupError } = await supabase.auth.admin.getUserByEmail(email);
-    // 1. Verificar si el email ya existe en la tabla usuarios
-    const { data: existingUsers, error: findUserError } = await supabase
+    /**
+     * 0) Verificar si ya existe en public.usuarios (case-insensitive)
+     *    Esto cubre el caso más común.
+     */
+    const { data: existingUser, error: existingUserError } = await supabase
       .from('usuarios')
       .select('id')
-      .eq('email', email);
-    if (findUserError) {
-      return res.status(500).json({ success: false, msg: 'Error al verificar usuario existente.' });
+      .ilike('email', emailNorm)
+      .maybeSingle();
+
+    if (existingUserError) {
+      return res.status(500).json({ success: false, msg: 'Error al verificar usuario existente.', detail: existingUserError.message });
     }
 
-    // Caso 1: Existe en Auth y en usuarios
-    if (authUserLookup && authUserLookup.user && existingUsers && existingUsers.length > 0) {
+    if (existingUser) {
       return res.status(409).json({ success: false, msg: 'El email ya está registrado.' });
     }
 
-    // Caso 2: Existe en Auth pero NO en usuarios
-    if (authUserLookup && authUserLookup.user && (!existingUsers || existingUsers.length === 0)) {
-      const id_usuario = authUserLookup.user.id;
-      // Inserta en usuarios (upsert para máxima robustez)
-      const { error: userError } = await supabase
-        .from('usuarios')
-        .upsert({
-          id: id_usuario,
-          nombre_completo,
-          email,
-          telefono: telefono || null,
-          activo: true,
-          fecha_creacion: new Date().toISOString()
-        });
-      if (userError) {
-        return res.status(400).json({ success: false, msg: 'Error al guardar usuario en la base de datos.' });
-      }
-      return res.status(200).json({
-        success: true,
-        msg: "Usuario sincronizado con éxito. Revisa tu email para confirmar tu cuenta.",
-      });
-    }
-
-    // Caso 3: NO existe en Auth (ni en usuarios)
+    /**
+     * 1) Crear usuario en Supabase Auth.
+     *    Trigger: crea public.usuarios automáticamente.
+     */
     const { data: authUser, error: authError } = await supabase.auth.signUp({
-      email,
+      email: emailNorm,
       password,
       options: {
         emailRedirectTo: `${process.env.FRONTEND_URL || 'http://localhost:4200'}/login`
       }
     });
+
     if (authError) {
-      return res.status(400).json({ success: false, msg: authError.message || 'Error en el registro.' });
+      // Si el error es "ya existe", devuelves 409
+      // (Supabase puede devolverlo como 400 con mensaje)
+      const msg = authError.message || 'Error en el registro.';
+      if (msg.toLowerCase().includes('already') || msg.toLowerCase().includes('registered')) {
+        return res.status(409).json({ success: false, msg: 'El email ya está registrado.' });
+      }
+      return res.status(400).json({ success: false, msg });
     }
-    const id_usuario = authUser.user.id;
-    // Inserta en usuarios (upsert para máxima robustez)
-    const { error: userError } = await supabase
+
+    const id_usuario = authUser?.user?.id;
+    if (!id_usuario) {
+      return res.status(500).json({ success: false, msg: 'No se pudo obtener el ID del usuario creado en Auth.' });
+    }
+
+    /**
+     * 2) Completar perfil en public.usuarios con UPSERT por id
+     *    (evita duplicado por trigger y completa nombre/telefono).
+     */
+    const { error: upsertError } = await supabase
       .from('usuarios')
-      .upsert({
-        id: id_usuario,
-        nombre_completo,
-        email,
-        telefono: telefono || null,
-        activo: true,
-        fecha_creacion: new Date().toISOString()
+      .upsert(
+        {
+          id: id_usuario,
+          nombre_completo,
+          email: emailNorm,
+          telefono: telefono || null,
+          activo: true,
+          fecha_creacion: new Date().toISOString()
+        },
+        { onConflict: 'id' }
+      );
+
+    if (upsertError) {
+      await tryDeleteAuthUser(id_usuario);
+
+      return res.status(400).json({
+        success: false,
+        msg: 'Error al guardar usuario en la base de datos.',
+        detail: upsertError.message,
+        code: upsertError.code
       });
-    if (userError) {
-      return res.status(400).json({ success: false, msg: 'Error al guardar usuario en la base de datos.' });
     }
-    // 3. Generar token JWT local (sin esperar confirmación de email)
+
+    /**
+     * 3) Generar token JWT propio (tu middleware lo exige)
+     */
     const payload = { userId: id_usuario, businessId: null, roleId: 2 };
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.status(200).json({
+
+    return res.status(201).json({
       success: true,
       msg: "Usuario registrado con éxito. Revisa tu email para confirmar tu cuenta.",
       token,
       user: {
         id: id_usuario,
         nombre_completo,
-        email,
+        email: emailNorm,
         roleId: 2,
         businessId: null
       }
     });
+
   } catch (error) {
     console.error('Error en el registro de usuario:', error);
-    res.status(500).json({ success: false, msg: error.message || 'Error interno del servidor.' });
+    return res.status(500).json({ success: false, msg: error.message || 'Error interno del servidor.' });
   }
 };
 
+
+/**
+ * =========================================
+ * LOGIN
+ * =========================================
+ */
 const login = async (req, res) => {
   const { email, password } = req.body;
+
   if (!email || !password) {
-    return res.status(400).json({ msg: 'Email y contraseña son obligatorios.' });
+    return res.status(400).json({ success: false, msg: 'Email y contraseña son obligatorios.' });
   }
-  
+
+  const emailNorm = normalizeEmail(email);
+
   try {
-    // 1. Login con Supabase Auth
+    /**
+     * 1) Login con Supabase Auth
+     */
     const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-      email,
+      email: emailNorm,
       password,
     });
 
@@ -210,13 +295,15 @@ const login = async (req, res) => {
 
     const { user } = authData;
 
-    // 2. Verificar usuario en tabla usuarios
+    /**
+     * 2) Verificar usuario en tabla usuarios
+     */
     const { data: userRecord, error: userError } = await supabase
       .from('usuarios')
       .select('*')
       .eq('id', user.id)
       .single();
-    
+
     if (userError || !userRecord) {
       return res.status(404).json({ success: false, msg: 'Usuario no encontrado en la base de datos.' });
     }
@@ -225,26 +312,30 @@ const login = async (req, res) => {
       return res.status(403).json({ success: false, msg: 'Usuario inactivo. Contacte al administrador.' });
     }
 
-    // 3. Determinar rol y negocio
+    /**
+     * 3) Determinar rol y negocio
+     */
     let businessId = null;
-    let roleId = 2; // Default: Usuario normal
+    let roleId = 2; // Usuario normal por defecto
 
-    const { data: negocio } = await supabase
+    const { data: negocio, error: negocioLookupError } = await supabase
       .from('negocios')
       .select('id')
       .eq('id_usuario_owner', user.id)
       .maybeSingle();
 
-    if (negocio) {
+    if (!negocioLookupError && negocio) {
       businessId = negocio.id;
       roleId = 1; // Admin de negocio
     }
 
-    // 4. Generar token JWT propio
+    /**
+     * 4) Generar token JWT propio (tu middleware lo valida)
+     */
     const payload = { userId: user.id, businessId, roleId };
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       msg: "Login exitoso.",
       token,
@@ -259,7 +350,7 @@ const login = async (req, res) => {
 
   } catch (error) {
     console.error('Error en el login:', error);
-    res.status(500).json({ success: false, msg: 'Error interno del servidor.' });
+    return res.status(500).json({ success: false, msg: 'Error interno del servidor.' });
   }
 };
 

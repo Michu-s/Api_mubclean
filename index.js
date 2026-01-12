@@ -26,7 +26,8 @@ const swaggerOptions = {
     },
     servers: [
       {
-        url: `http://localhost:${process.env.PORT || 3000}`,
+        // URL relativa para que Swagger funcione aunque el puerto cambie.
+        url: '/',
         description: 'Servidor de Desarrollo'
       }
     ],
@@ -79,8 +80,36 @@ app.use((err, req, res, next) => {
   res.status(500).send('¡Algo salió mal!');
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
-  console.log(`📚 Documentación de API disponible en http://localhost:${PORT}/api-docs`);
-});
+let PORT = Number(process.env.PORT) || 3000;
+const MAX_PORT_TRIES = 10;
+
+function startServer(port, remainingTries) {
+  const server = app.listen(port, () => {
+    PORT = port;
+    process.env.PORT = String(PORT);
+    console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
+    console.log(`📚 Documentación de API disponible en http://localhost:${PORT}/api-docs`);
+  });
+
+  server.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE') {
+      if (remainingTries > 0) {
+        const nextPort = port + 1;
+        console.warn(`WARN: El puerto ${port} está en uso. Probando con ${nextPort}...`);
+        return startServer(nextPort, remainingTries - 1);
+      }
+      console.error(
+        `ERROR: No se encontró un puerto libre desde ${port - MAX_PORT_TRIES} hasta ${port}. ` +
+          'Libera el puerto o define PORT=xxxx.'
+      );
+      process.exit(1);
+    }
+
+    console.error('Server error:', err);
+    process.exit(1);
+  });
+
+  return server;
+}
+
+startServer(PORT, MAX_PORT_TRIES);
