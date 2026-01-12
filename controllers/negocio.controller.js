@@ -5,12 +5,19 @@ const { v4: uuidv4 } = require("uuid");
 // --- Perfil del Negocio ---
 
 exports.getNegocio = async (req, res) => {
-  const { businessId } = req.user;
+  const { id: userId, businessId } = req.user;
+  
   try {
-    const { data: rows, error } = await supabase
-      .from("negocios")
-      .select("*")
-      .eq("id", businessId);
+    let query = supabase.from("negocios").select("*");
+
+    // Si el token tiene businessId, lo usamos. Si no (caso: recién creado), buscamos por dueño.
+    if (businessId) {
+        query = query.eq("id", businessId);
+    } else {
+        query = query.eq("id_usuario_owner", userId);
+    }
+
+    const { data: rows, error } = await query;
 
     if (error) throw error;
 
@@ -20,7 +27,7 @@ exports.getNegocio = async (req, res) => {
     res.json(rows[0]);
   } catch (error) {
     console.error("Error en getNegocio:", error);
-    res.status(500).json({ msg: "Error interno del servidor" });
+    res.status(500).json({ msg: "Error interno del servidor: " + error.message });
   }
 };
 
@@ -109,6 +116,7 @@ exports.updateNegocio = async (req, res) => {
     descripcion,
     url_logo,
     url_banner,
+    activo // <--- Nuevo campo
   } = req.body;
 
   const updateData = {};
@@ -118,6 +126,14 @@ exports.updateNegocio = async (req, res) => {
   if (descripcion) updateData.descripcion = descripcion;
   if (url_logo) updateData.url_logo = url_logo;
   if (url_banner) updateData.url_banner = url_banner;
+  
+  // Validamos si viene el campo activo (booleano)
+  if (typeof activo === 'boolean') {
+      updateData.activo = activo;
+  } else if (activo === 'true' || activo === 'false') {
+      // Por si viene como string desde algún form-data
+      updateData.activo = (activo === 'true');
+  }
 
   if (Object.keys(updateData).length === 0) {
     return res.status(400).json({ msg: "No hay campos para actualizar." });
